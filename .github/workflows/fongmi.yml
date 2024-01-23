@@ -1,0 +1,75 @@
+name: Fongmi
+
+on:
+  schedule:
+    - cron: 0 * * * *
+  workflow_dispatch:
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    outputs:
+      commit: ${{ env.commit }}
+      commitS: ${{ env.commitS }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: fongmi
+      - name: Check New Commit
+        run: |
+          commit=$(curl -sL https://github.com/FongMi/TV/commits/dev/ }} |grep -o "/commit/[a-z0-9]\+" |head -1 | cut -d\/ -f3)
+          commitS=${commit:0:7}
+          if ! grep -q "$commitS" mobile.json; then
+            echo "commit=$commit" >> $GITHUB_ENV
+            echo "commitS=$commitS" >> $GITHUB_ENV
+          fi
+  build:
+    needs: prepare
+    if: ${{ needs.prepare.outputs.commit }}
+    strategy:
+      fail-fast: false
+      matrix:
+        mode: [ leanback, mobile ]
+        api: [ java, python ]
+        abi: [ x86, arm64_v8a, armeabi_v7a ]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          repository: FongMi/TV
+          ref: ${{ needs.prepare.outputs.commit }}
+      - name: Check Version
+        run: |
+          versionCode=$(grep 'versionCode' app/build.gradle| grep -o '[0-9a-zA-Z#._-]\+$')
+          versionName="$(date -d "8 hour" -u +'%m%d%H')#${{ needs.prepare.outputs.commitS }}"
+          sed -i "/versionName/s/\".*/\"$versionName\"/" app/build.gradle
+          setup_java_ver=$(grep -o 'JavaVersion.VERSION_[0-9_]\+' app/build.gradle |head -1 |sed 's/.*_//')
+          echo "versionCode=$versionCode" >> $GITHUB_ENV
+          echo "versionName=$versionName" >> $GITHUB_ENV
+          echo "setup_java_ver=$setup_java_ver" >> $GITHUB_ENV
+      - name: Set Update Url
+        run: |
+          sed -i '/apk\//s#return.*,#return \"https://raw.githubusercontent.com/o0HalfLife0o/TVBoxOSC/fongmi/\" +#'  catvod/src/main/java/com/github/catvod/utils/Github.java
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: ${{ env.setup_java_ver }}
+      - uses: gradle/gradle-build-action@v2
+      - name: Build With Gradle
+        run: |
+          chmod +x gradlew
+          ./gradlew assemble${{ matrix.mode }}${{ matrix.api }}${{ matrix.abi }}release --build-cache --parallel --daemon --warning-mode all
+      - name: Prepare App
+        run: |
+          rm -rf apk/
+          mkdir -p apk/
+          for file in `find ~ -name "*release*.apk" -print`; do
+            mv "$file" apk/
+          done
+      - name: Upload App To Artifact
+        uses: actions/upload-artifact@v3
+        with:
+          name: ${{ matrix.mode }}-${{ matrix.api }}-${{ matrix.abi }}
+          path: |
+            apk/*
